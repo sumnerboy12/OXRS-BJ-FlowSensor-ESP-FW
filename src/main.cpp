@@ -1,5 +1,5 @@
 /**
-  ESP8266 Flow sensor firmware for the Open eXtensible Rack System
+  ESP32 Flow sensor firmware for the Open eXtensible Rack System
   
   GitHub repository:
     https://github.com/sumnerboy12/OXRS-BJ-FlowSensor-ESP-FW
@@ -12,7 +12,9 @@
 
 /*--------------------------- Libraries -------------------------------*/
 #include <Arduino.h>
-#include <WebServer_WT32_ETH01.h>
+#include <ETH.h>                    // For networking
+#include <SPI.h>                    // For ethernet
+#include <WiFi.h>                   // For networking
 #include <OXRS_MQTT.h>
 #include <OXRS_API.h>
 #include <MqttLogger.h>
@@ -37,18 +39,25 @@
 #define     DHCP_TIMEOUT_MS                 15000
 #define     DHCP_RESPONSE_TIMEOUT_MS        4000
 
+#define     ETH_PHY_I2C_ADDR                1                     // I²C-address of Ethernet PHY (0 or 1 for LAN8720, 31 for TLK110)
+#define     ETH_PHY_ENABLE                  16                    // Pin# of the enable signal for the external crystal oscillator (-1 to disable for internal APLL source)
+#define     ETH_PHY_MDC                     23                    // Pin# of the I²C clock signal for the Ethernet PHY
+#define     ETH_PHY_MDIO                    18                    // Pin# of the I²C IO signal for the Ethernet PHY
+#define     ETH_PHY_TYPE                    ETH_PHY_LAN8720       // Type of the Ethernet PHY (LAN8720 or TLK110)  
+#define     ETH_CLK_MODE                    ETH_CLOCK_GPIO0_IN    // Version with not PSRAM
+
 /*--------------------------- Global Variables ------------------------*/
-// config variables
+// Ethernet variables
+bool ethernetConnected = false;
+
+// Config variables
 uint32_t telemetryIntervalMs = DEFAULT_TELEMETRY_INTERVAL_MS;
 int kFactor = DEFAULT_K_FACTOR;
 
-// pulse count/telemetry variables
+// Pulse count/telemetry variables
 uint32_t pulseCount = 0L;
 uint32_t lastTelemetryMs = 0L;
 uint32_t elapsedTelemetryMs = 0L;
-
-// stack size counter
-char * stackStart;
 
 /*--------------------------- Instantiate Globals ---------------------*/
 // Network client (for MQTT) and server (for REST API)
@@ -66,12 +75,6 @@ OXRS_API _api(_mqtt);
 MqttLogger _logger(_mqttClient, "log", MqttLoggerMode::MqttAndSerial);
 
 /*--------------------------- Program ---------------------------------*/
-uint32_t getStackSize()
-{
-  char stack;
-  return (uint32_t)stackStart - (uint32_t)&stack;  
-}
-
 void IRAM_ATTR isr() {
   pulseCount++;
 }
@@ -279,31 +282,6 @@ void initialiseSensor(void)
   attachInterrupt(SENSOR_PIN, isr, FALLING);
 }
 
-void initialiseNetwork(byte * mac)
-{
-  // To be called before ETH.begin()
-  WT32_ETH01_onEvent();
-
-  // Start ethernet
-  ETH.begin(ETH_PHY_ADDR, ETH_PHY_POWER);
-
-  // Wait for ethernet to connect
-  WT32_ETH01_waitForConnect();
-
-  // Get the ethernet MAC address
-  ETH.macAddress(mac);
-
-  // Display the MAC address on serial
-  char mac_display[18];
-  sprintf_P(mac_display, PSTR("%02X:%02X:%02X:%02X:%02X:%02X"), mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-  _logger.print(F("[flow] mac address: "));
-  _logger.println(mac_display);
-
-  // Display IP address on serial
-  _logger.print(F("[flow] ip address: "));
-  _logger.println(ETH.localIP());
-}
-
 void initialiseMqtt(byte * mac)
 {
   // Set the default client id to the last 3 bytes of the MAC address
@@ -337,30 +315,76 @@ void initialiseRestApi(void)
   _server.begin();
 }
 
+void ethernetEvent(WiFiEvent_t event)
+{
+  // Log the event to serial for debugging
+  switch (event)
+  {
+    case ARDUINO_EVENT_ETH_START:
+      // Get the ethernet MAC address
+      byte mac[6];
+      ETH.macAddress(mac);
+
+      // Display the MAC address on serial
+      char mac_display[18];
+      sprintf_P(mac_display, PSTR("%02X:%02X:%02X:%02X:%02X:%02X"), mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+      _logger.print(F("[flow] mac address: "));
+      _logger.println(mac_display);
+
+      // Set up MQTT (don't attempt to connect yet)
+      initialiseMqtt(mac);
+      break;
+
+    case ARDUINO_EVENT_ETH_CONNECTED:
+      _logger.println(F("[flow] ethernet connected"));
+      break;
+
+    case ARDUINO_EVENT_ETH_GOT_IP:
+      // Display the IP address assigned by DHCP on serial
+      _logger.print(F("[flow] ip address: "));
+      _logger.println(ETH.localIP());
+
+      ethernetConnected = true;
+      break;
+
+    case ARDUINO_EVENT_ETH_DISCONNECTED:
+      _logger.println(F("[flow] ethernet disconnected"));
+
+      ethernetConnected = false;
+      break;
+
+    case ARDUINO_EVENT_ETH_STOP:
+      _logger.println(F("[flow] ethernet stopped"));
+
+      ethernetConnected = false;
+      break;
+  }
+}
+
+void initialiseNetwork()
+{
+  // We continue initialisation inside this event handler
+  WiFi.onEvent(ethernetEvent);
+
+  // Start the Ethernet PHY and wait for events
+  ETH.begin(ETH_PHY_I2C_ADDR, ETH_PHY_ENABLE, ETH_PHY_MDC, ETH_PHY_MDIO, ETH_PHY_TYPE, ETH_CLK_MODE);
+}
+
 /**
   Setup
 */
 void setup() 
 {
-  // Store the address of the stack at startup so we can determine
-  // the stack size at runtime (see getStackSize())
-  char stack;
-  stackStart = &stack;
-  
   // Set up serial
   initialiseSerial();  
 
   // Set up sensor
   initialiseSensor();
 
-  // Set up network/MQTT/REST API
-  byte mac[6];
-  initialiseNetwork(mac);
+  // Set up network
+  initialiseNetwork();
 
-  // Set up MQTT (don't attempt to connect yet)
-  initialiseMqtt(mac);
-
-  // Set up the REST API once we have an IP address
+  // Set up REST API
   initialiseRestApi();
 }
 
@@ -369,14 +393,16 @@ void setup()
 */
 void loop() 
 {
+  // Wait until our ethernet connection is up
+  if (!ethernetConnected)
+  {
+    delay(100);
+    return;
+  }
+
   // Check our MQTT broker connection is still ok
   _mqtt.loop();
 
-  // Maintain DHCP lease
-  #if defined(ETHMODE)
-  //Ethernet.maintain();
-  #endif
-  
   // Handle any API requests
   WiFiClient client = _server.available();
   _api.loop(&client);
@@ -385,15 +411,17 @@ void loop()
   elapsedTelemetryMs = millis() - lastTelemetryMs;
   if (elapsedTelemetryMs >= telemetryIntervalMs)
   {
-    // Publish telemetry
+    // Build telemetry payload
     StaticJsonDocument<128> json;
     json["elapsedMs"] = elapsedTelemetryMs;
     json["pulseCount"] = pulseCount;
-    json["volumeMls"] = (int)(pulseCount * 1000 / kFactor);
-    _mqtt.publishTelemetry(json);
-
-    // Reset loop variables
-    lastTelemetryMs = millis();
-    pulseCount = 0;
+    json["volumeMls"] = (uint32_t)(pulseCount * 1000 / kFactor);
+    
+    // Publish telemetry and reset loop variables if successful
+    if (_mqtt.publishTelemetry(json))
+    {
+      lastTelemetryMs = millis();
+      pulseCount = 0;
+    }
   }
 }
