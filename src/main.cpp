@@ -6,41 +6,16 @@
     
   Copyright 2023 Ben Jones <ben.jones12@gmail.com>
 */
-
-/*------------------------ Board Type ---------------------------------*/
-//#define MCU8266 
-//#define MCULILY
-
-/*----------------------- Connection Type -----------------------------*/
-//#define ETHMODE
-//#define WIFIMODE
-
 /*--------------------------- Macros ----------------------------------*/
 #define STRINGIFY(s) STRINGIFY1(s)
 #define STRINGIFY1(s) #s
 
 /*--------------------------- Libraries -------------------------------*/
 #include <Arduino.h>
+#include <WebServer_WT32_ETH01.h>
 #include <OXRS_MQTT.h>
 #include <OXRS_API.h>
-#include <WiFiManager.h>
 #include <MqttLogger.h>
-
-#if defined(MCU8266)
-#include <ESP8266WiFi.h>            // For networking
-#if defined(ETHMODE)
-#include <Ethernet.h>               // For networking
-#include <SPI.h>                    // For ethernet
-#endif
-#endif
-
-#if defined(MCULILY)
-#include <WiFi.h>                   // For networking
-#if defined(ETHMODE)
-#include <ETH.h>                    // For networking
-#include <SPI.h>                    // For ethernet
-#endif
-#endif
 
 /*--------------------------- Constants -------------------------------*/
 // Serial
@@ -49,32 +24,18 @@
 // REST API
 #define     REST_API_PORT                   80
 
+// Sensor pin
+#define     SENSOR_PIN                      2
+
 // Config defaults and constraints
 #define     DEFAULT_TELEMETRY_INTERVAL_MS   1000
-#define     TELEMETRY_INTERVAL_MS_MAX       60000
 #define     DEFAULT_K_FACTOR                49
+#define     TELEMETRY_INTERVAL_MS_MAX       60000
 #define     K_FACTOR_MAX                    1000
 
 // Ethernet
-#if defined(ETHMODE)
-#define DHCP_TIMEOUT_MS             15000
-#define DHCP_RESPONSE_TIMEOUT_MS    4000
-
-#if defined(MCU8266)
-#define WIZNET_RST_PIN              2
-#define ETHERNET_CS_PIN             15
-
-#elif defined(MCULILY)
-#define ETH_CLOCK_MODE              ETH_CLOCK_GPIO17_OUT   // Version with not PSRAM
-#define ETH_PHY_TYPE                ETH_PHY_LAN8720        // Type of the Ethernet PHY (LAN8720 or TLK110)  
-#define ETH_PHY_POWER               -1                     // Pin# of the enable signal for the external crystal oscillator (-1 to disable for internal APLL source)
-#define ETH_PHY_MDC                 23                     // Pin# of the I²C clock signal for the Ethernet PHY
-#define ETH_PHY_MDIO                18                     // Pin# of the I²C IO signal for the Ethernet PHY
-#define ETH_PHY_ADDR                0                      // I²C-address of Ethernet PHY (0 or 1 for LAN8720, 31 for TLK110)
-#define ETH_RST_PIN                 5
-
-#endif
-#endif
+#define     DHCP_TIMEOUT_MS                 15000
+#define     DHCP_RESPONSE_TIMEOUT_MS        4000
 
 /*--------------------------- Global Variables ------------------------*/
 // config variables
@@ -90,20 +51,9 @@ uint32_t elapsedTelemetryMs = 0L;
 char * stackStart;
 
 /*--------------------------- Instantiate Globals ---------------------*/
-#if defined(ETHMODE)
-#if defined(MCU8266)
-EthernetClient _client;
-EthernetServer _server(REST_API_PORT);
-#elif defined(MCULILY)
+// Network client (for MQTT) and server (for REST API)
 WiFiClient _client;
 WiFiServer _server(REST_API_PORT);
-#endif
-#endif
-
-#if defined(WIFIMODE)
-WiFiClient _client;
-WiFiServer _server(REST_API_PORT);
-#endif
 
 // MQTT client
 PubSubClient _mqttClient(_client);
@@ -146,58 +96,23 @@ void getSystemJson(JsonVariant json)
 
   system["flashChipSizeBytes"] = ESP.getFlashChipSize();
   system["heapFreeBytes"] = ESP.getFreeHeap();
-
-  #if defined(MCULILY)
   system["heapUsedBytes"] = ESP.getHeapSize();
   system["heapMaxAllocBytes"] = ESP.getMaxAllocHeap();
-  
-  #elif defined(MCU8266)
-  system["heapUsedBytes"] = getStackSize();
-  
-  #endif
 
   system["sketchSpaceUsedBytes"] = ESP.getSketchSize();
   system["sketchSpaceTotalBytes"] = ESP.getFreeSketchSpace();
 
-  #if defined(MCULILY)
   system["fileSystemUsedBytes"] = SPIFFS.usedBytes();
   system["fileSystemTotalBytes"] = SPIFFS.totalBytes();
-
-  #elif defined(MCU8266)
-  FSInfo fsInfo;
-  SPIFFS.info(fsInfo);  
-  system["fileSystemUsedBytes"] = fsInfo.usedBytes;
-  system["fileSystemTotalBytes"] = fsInfo.totalBytes;
-
-  #endif
 }
 
 void getNetworkJson(JsonVariant json)
 {
   JsonObject network = json.createNestedObject("network");
   
-  #if defined(ETHMODE) && defined(MCULILY)
   network["mode"] = "ethernet";
   network["ip"] = ETH.localIP();
   network["mac"] = ETH.macAddress();
-
-  #else
-  byte mac[6];
-  
-  #if defined(ETHMODE)
-  network["mode"] = "ethernet";
-  Ethernet.MACAddress(mac);
-  network["ip"] = Ethernet.localIP();
-  #elif defined(WIFIMODE)
-  network["mode"] = "wifi";
-  WiFi.macAddress(mac);
-  network["ip"] = WiFi.localIP();
-  #endif
-  
-  char mac_display[18];
-  sprintf_P(mac_display, PSTR("%02X:%02X:%02X:%02X:%02X:%02X"), mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-  network["mac"] = mac_display;
-  #endif
 }
 
 void getConfigSchemaJson(JsonVariant json)
@@ -364,6 +279,31 @@ void initialiseSensor(void)
   attachInterrupt(SENSOR_PIN, isr, FALLING);
 }
 
+void initialiseNetwork(byte * mac)
+{
+  // To be called before ETH.begin()
+  WT32_ETH01_onEvent();
+
+  // Start ethernet
+  ETH.begin(ETH_PHY_ADDR, ETH_PHY_POWER);
+
+  // Wait for ethernet to connect
+  WT32_ETH01_waitForConnect();
+
+  // Get the ethernet MAC address
+  ETH.macAddress(mac);
+
+  // Display the MAC address on serial
+  char mac_display[18];
+  sprintf_P(mac_display, PSTR("%02X:%02X:%02X:%02X:%02X:%02X"), mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  _logger.print(F("[flow] mac address: "));
+  _logger.println(mac_display);
+
+  // Display IP address on serial
+  _logger.print(F("[flow] ip address: "));
+  _logger.println(ETH.localIP());
+}
+
 void initialiseMqtt(byte * mac)
 {
   // Set the default client id to the last 3 bytes of the MAC address
@@ -397,96 +337,6 @@ void initialiseRestApi(void)
   _server.begin();
 }
 
-#if defined(WIFIMODE)
-void initialiseNetwork()
-{
-  // Ensure we are in the correct WiFi mode
-  WiFi.mode(WIFI_STA);
-
-  // Get WiFi base MAC address
-  byte mac[6];
-  WiFi.macAddress(mac);
-
-  // Display the MAC address on serial
-  char mac_display[18];
-  sprintf_P(mac_display, PSTR("%02X:%02X:%02X:%02X:%02X:%02X"), mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-  _logger.print(F("[flow] mac address: "));
-  _logger.println(mac_display);
-
-  // Connect using saved creds, or start captive portal if none found
-  // Blocks until connected or the portal is closed
-  WiFiManager wm;
-  if (!wm.autoConnect("OXRS_WiFi", "superhouse"))
-  {
-    // If we are unable to connect then restart
-    ESP.restart();
-  }
-
-  // Display IP address on serial
-  _logger.print(F("[flow] ip address: "));
-  _logger.println(WiFi.localIP());
-
-  // Set up MQTT (don't attempt to connect yet)
-  initialiseMqtt(mac);
-
-  // Set up the REST API once we have an IP address
-  initialiseRestApi();
-}
-#endif
-
-#if defined(ETHMODE)
-void ethernetEvent(WiFiEvent_t event)
-{
-  // Log the event to serial for debugging
-  switch (event)
-  {
-    case ARDUINO_EVENT_ETH_START:
-      // Get the ethernet MAC address
-      byte mac[6];
-      ETH.macAddress(mac);
-
-      // Display the MAC address on serial
-      char mac_display[18];
-      sprintf_P(mac_display, PSTR("%02X:%02X:%02X:%02X:%02X:%02X"), mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-      _logger.print(F("[flow] mac address: "));
-      _logger.println(mac_display);
-
-      // Set up MQTT (don't attempt to connect yet)
-      initialiseMqtt(mac);
-      break;
-    case ARDUINO_EVENT_ETH_GOT_IP:
-      // Get the IP address assigned by DHCP
-      IPAddress ip = ETH.localIP();
-
-      _logger.print(F("[flow] ip address: "));
-      _logger.println(ip);
-
-      // Set up the REST API once we have an IP address
-      initialiseRestApi();
-      break;
-  }
-}
-
-void initialiseNetwork()
-{
-  // We continue initialisation inside this event handler
-  WiFi.onEvent(ethernetEvent);
-
-  // Reset the Ethernet PHY
-  pinMode(ETH_RST_PIN, OUTPUT);
-  digitalWrite(ETH_RST_PIN, 0);
-  delay(200);
-  digitalWrite(ETH_RST_PIN, 1);
-  delay(200);
-  digitalWrite(ETH_RST_PIN, 0);
-  delay(200);
-  digitalWrite(ETH_RST_PIN, 1);
-
-  // Start the Ethernet PHY and wait for events
-  ETH.begin(ETH_PHY_ADDR, ETH_PHY_POWER, ETH_PHY_MDC, ETH_PHY_MDIO, ETH_PHY_TYPE, ETH_CLOCK_MODE);  
-}
-#endif
-
 /**
   Setup
 */
@@ -504,7 +354,14 @@ void setup()
   initialiseSensor();
 
   // Set up network/MQTT/REST API
-  initialiseNetwork();
+  byte mac[6];
+  initialiseNetwork(mac);
+
+  // Set up MQTT (don't attempt to connect yet)
+  initialiseMqtt(mac);
+
+  // Set up the REST API once we have an IP address
+  initialiseRestApi();
 }
 
 /**
@@ -516,18 +373,13 @@ void loop()
   _mqtt.loop();
 
   // Maintain DHCP lease
-  #if defined(ETHMODE) && not defined(MCULILY)
-  Ethernet.maintain();
+  #if defined(ETHMODE)
+  //Ethernet.maintain();
   #endif
   
   // Handle any API requests
-  #if defined(WIFIMODE) || defined(MCULILY)
   WiFiClient client = _server.available();
   _api.loop(&client);
-  #elif defined(ETHMODE)
-  EthernetClient client = _server.available();
-  _api.loop(&client);
-  #endif
 
   // Check if we need to send telemetry
   elapsedTelemetryMs = millis() - lastTelemetryMs;
