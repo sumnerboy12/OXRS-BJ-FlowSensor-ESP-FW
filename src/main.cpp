@@ -9,14 +9,15 @@
 
 /*--------------------------- Libraries -------------------------------*/
 #include <Arduino.h>
+
+#if defined(OXRS_ROOM8266)
 #include <OXRS_Room8266.h>
+OXRS_Room8266 oxrs;
+#endif
 
 /*--------------------------- Constants -------------------------------*/
 // Serial
 #define   SERIAL_BAUD_RATE                115200
-
-// Sensor pin
-#define   SENSOR_PIN                      4       // SDA on IDC header
 
 // Config defaults and constraints
 #define   DEFAULT_TELEMETRY_INTERVAL_MS   1000
@@ -33,10 +34,6 @@ int       kFactor                       = DEFAULT_K_FACTOR;
 uint32_t  pulseCount                    = 0L;
 uint32_t  lastTelemetryMs               = 0L;
 uint32_t  elapsedTelemetryMs            = 0L;
-
-/*--------------------------- Instantiate Globals ---------------------*/
-// Room8266 handler
-OXRS_Room8266 room8266;
 
 /*--------------------------- Program ---------------------------------*/
 void IRAM_ATTR isr() 
@@ -64,7 +61,7 @@ void setConfigSchema()
   kFactor["maximum"] = K_FACTOR_MAX;
 
   // Pass our config schema down to the Room8266 library
-  room8266.setConfigSchema(json.as<JsonVariant>());
+  oxrs.setConfigSchema(json.as<JsonVariant>());
 }
 
 void jsonConfig(JsonVariant json)
@@ -91,18 +88,18 @@ void setup()
   Serial.println(F("[flow] starting up..."));
 
   // Enable internal pullup on our sensor pin
-  pinMode(SENSOR_PIN, INPUT_PULLUP);
+  pinMode(I2C_SDA, INPUT_PULLUP);
 
   // Setup the sensor pin to trigger our interrupt service routine when 
   // pin goes from HIGH to LOW, i.e. FALLING edge
-  attachInterrupt(SENSOR_PIN, isr, FALLING);
+  attachInterrupt(I2C_SDA, isr, FALLING);
 
   // Log the pin we are monitoring for pulse events
-  room8266.print(F("[flow] pulse sensor pin: "));
-  room8266.println(SENSOR_PIN);
+  oxrs.print(F("[flow] pulse sensor pin: "));
+  oxrs.println(I2C_SDA);
 
   // Start Room8266 hardware
-  room8266.begin(jsonConfig, NULL);
+  oxrs.begin(jsonConfig, NULL);
 
   // Set up config schema (for self-discovery and adoption)
   setConfigSchema();
@@ -114,7 +111,7 @@ void setup()
 void loop() 
 {
   // Let Room8266 hardware handle any events etc
-  room8266.loop();
+  oxrs.loop();
 
   // Check if we need to send telemetry
   elapsedTelemetryMs = millis() - lastTelemetryMs;
@@ -127,7 +124,7 @@ void loop()
     json["volumeMls"] = (uint32_t)(pulseCount * 1000 / kFactor);
     
     // Publish telemetry and reset loop variables if successful
-    if (room8266.publishTelemetry(json))
+    if (oxrs.publishTelemetry(json))
     {
       lastTelemetryMs = millis();
       pulseCount = 0;
