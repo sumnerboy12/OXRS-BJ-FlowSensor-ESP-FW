@@ -1,5 +1,5 @@
 /**
-  ESP8266 Flow sensor firmware for the Open eXtensible Rack System
+  Flow sensor firmware for the Open eXtensible Rack System
   
   GitHub repository:
     https://github.com/sumnerboy12/OXRS-BJ-FlowSensor-ESP-FW
