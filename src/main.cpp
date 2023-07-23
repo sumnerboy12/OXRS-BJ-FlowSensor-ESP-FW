@@ -9,6 +9,7 @@
 
 /*--------------------------- Libraries -------------------------------*/
 #include <Arduino.h>
+#include <OXRS_HASS.h>
 
 #if defined(OXRS_ROOM8266)
 #include <OXRS_Room8266.h>
@@ -35,6 +36,13 @@ uint32_t  pulseCount                    = 0L;
 uint32_t  lastTelemetryMs               = 0L;
 uint32_t  elapsedTelemetryMs            = 0L;
 
+// Publish Home Assistant self-discovery config for each sensor
+bool      hassDiscoveryPublished        = false;
+
+/*--------------------------- Instantiate Globals ---------------------*/
+// home assistant discovery config
+OXRS_HASS hass(oxrs.getMQTT());
+
 /*--------------------------- Program ---------------------------------*/
 void IRAM_ATTR isr() 
 {
@@ -60,6 +68,9 @@ void setConfigSchema()
   kFactor["minimum"] = 1;
   kFactor["maximum"] = K_FACTOR_MAX;
 
+  // Add any Home Assistant config
+  hass.setConfigSchema(json);
+
   // Pass our config schema down to the Room8266 library
   oxrs.setConfigSchema(json.as<JsonVariant>());
 }
@@ -75,6 +86,35 @@ void jsonConfig(JsonVariant json)
   {
     kFactor = min(json["kFactor"].as<int>(), K_FACTOR_MAX);
   }
+
+  // Handle any Home Assistant config
+  hass.parseConfig(json);
+}
+
+void publishHassDiscovery()
+{
+  if (hassDiscoveryPublished)
+    return;
+
+  char topic[64];
+
+  char component[8];
+  sprintf_P(component, PSTR("sensor"));
+
+  char id[8];
+  sprintf_P(id, PSTR("flow"));
+
+  DynamicJsonDocument json(1024);
+  hass.getDiscoveryJson(json, id);
+
+  json["name"]  = "Flow Sensor";
+  json["dev_cla"] = "water";
+  json["unit_of_meas"] = "L";
+  json["stat_t"] = oxrs.getMQTT()->getTelemetryTopic(topic);
+  json["val_tpl"] = "{{ value_json.volumeMls / 1000 }}";
+
+  // Only publish once on boot
+  hassDiscoveryPublished = hass.publishDiscoveryJson(json, component, id);
 }
 
 /**
@@ -129,5 +169,11 @@ void loop()
       lastTelemetryMs = millis();
       pulseCount = 0;
     }
+  }
+
+  // Check if we need to publish any Home Assistant discovery payloads
+  if (hass.isDiscoveryEnabled())
+  {
+    publishHassDiscovery();
   }
 }
