@@ -112,6 +112,7 @@ void publishHassDiscovery()
   json["unit_of_meas"] = "L";
   json["stat_t"] = oxrs.getMQTT()->getTelemetryTopic(topic);
   json["val_tpl"] = "{{ value_json.volumeMls / 1000 }}";
+  json["frc_upd"] = true;
 
   // Only publish once on boot
   hassDiscoveryPublished = hass.publishDiscoveryJson(json, component, id);
